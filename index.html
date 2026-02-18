@@ -567,14 +567,15 @@ Seq Scan on users_expert ...
                     </div>
                     <div>
                         <p>データ件数 <i>N</i> = 1,000,000
-                            のテーブルがあります。主キー検索を行う際、B-treeインデックスを使うと、なぜわずか数回のディスクアクセスでデータに到達できるのですか？計算量の観点から説明してください。</p>
+                            のテーブルで <code>WHERE id = 1</code> を実行しました。オプティマイザはなぜ Seq Scan ではなく Index Scan
+                            を選択したのですか？コスト（I/O）の観点から説明してください。</p>
                     </div>
                     <details>
                         <summary>解答を表示</summary>
                         <div class="answer">
-                            <strong>解答: 対数時間 <i>O</i>(log <i>N</i>) で探索できるため。</strong><br>
-                            B-tree は平衡木であり、1つのノード（ページ）に数百個の分岐（ファンアウト）を持ちます。底が数百の対数計算となるため、log<sub>数百</sub> 1,000,000
-                            &approx; 2 &sim; 3 となり、高さ(Depth)は非常に低く抑えられます。これにより、100万件データでも、ルート→ブランチ→リーフと2〜3回のホップで到達可能です。
+                            <strong>解答: 圧倒的にページアクセス数が少ないから (3ページ vs 17906ページ)。</strong><br>
+                            Seq
+                            Scanでは全ページ(17906)を読む必要がありますが、B-treeを使えば、ルート→ブランチ→リーフとわずか2〜3ページ読むだけで該当行（およびそのTID）に到達できます。オプティマイザはこの物理的なI/O差をコスト計算に反映しています。
                         </div>
                     </details>
                 </div>
@@ -670,16 +671,17 @@ Seq Scan on users_expert ...
                         <span class="star-rating">★☆☆☆☆</span>
                     </div>
                     <div>
-                        <p><code>users</code> テーブルの <code>email</code> カラムで検索を行う以下のクエリが遅いと報告がありました。</p>
-                        <pre
-                            class="drill-code"><code class="language-sql">SELECT * FROM users WHERE email = 'test@example.com';</code></pre>
-                        <p>これを高速化するための最適なDDLを記述してください。</p>
+                        <p><code>SELECT * FROM users WHERE email = ?</code> の実行計画を確認すると、<strong>Seq Scan (全表走査)</strong>
+                            が選択されていました。<br>
+                            このクエリを <strong>Index Scan</strong> に変更させるためのチューニングを行ってください。</p>
                     </div>
                     <details>
                         <summary>解答を表示</summary>
                         <div class="answer">
                             <pre><code class="language-sql">CREATE INDEX idx_users_email ON users(email);</code></pre>
-                            <p>基本中の基本です。一意性（重複なし）が保証できるなら <code>CREATE UNIQUE INDEX</code> の方がより良いでしょう。</p>
+                            <p><strong>解説:</strong>
+                                オプティマイザに「インデックスを使う」という選択肢を与える必要があります。カーディナリティが高い（重複が少ない）カラムであれば、オプティマイザは即座に Index Scan
+                                に切り替えます。</p>
                         </div>
                     </details>
                 </div>
@@ -690,18 +692,19 @@ Seq Scan on users_expert ...
                         <span class="star-rating">★★☆☆☆</span>
                     </div>
                     <div>
-                        <p><code>created_at</code> (TIMESTAMP) カラムを持つテーブルに対し、2025年のデータを抽出したい。</p>
-                        <pre
-                            class="drill-code"><code class="language-sql">WHERE extract(year from created_at) = 2025</code></pre>
-                        <p>このクエリを高速化するためのインデックス定義を記述してください。</p>
+                        <p><code>WHERE extract(year from created_at) = 2025</code> という条件に対し、インデックスを作成したにもかかわらず
+                            <strong>Seq Scan</strong> のままでした。<br>
+                            なぜオプティマイザはインデックスを使えないのですか？また、どうすれば使えるようになりますか？
+                        </p>
                     </div>
                     <details>
                         <summary>解答を表示</summary>
                         <div class="answer">
-                            <pre><code class="language-sql">CREATE INDEX idx_users_created_year ON users( extract(year from created_at) );</code></pre>
-                            <p><strong>解説:</strong> 関数適用後の結果に対してインデックスを作成する「関数インデックス」が必要です。<br>
-                                別解として、クエリ側を <code>WHERE created_at BETWEEN '2025-01-01' AND '2025-12-31'</code>
-                                に書き換えられるなら、通常の <code>(created_at)</code> インデックスでも対応可能です。</p>
+                            <strong>解答: カラムが関数で加工されているから。</strong><br>
+                            B-treeには「生の created_at」順でデータが入っていますが、オプティマイザは「年だけ取り出した値」の順序を知りません。<br>
+                            解決策: <br>
+                            <pre><code class="language-sql">CREATE INDEX idx_users_year ON users( extract(year from created_at) );</code></pre>
+                            関数インデックスを作成することで、計算済みの値に対するパスをオプティマイザに提供できます。
                         </div>
                     </details>
                 </div>
@@ -712,19 +715,17 @@ Seq Scan on users_expert ...
                         <span class="star-rating">★★★☆☆</span>
                     </div>
                     <div>
-                        <p>掲示板テーブル <code>posts</code> (category_id, created_at, ...) があります。<br>
-                            「特定のカテゴリ(<code>category_id=5</code>)」の投稿を、「新しい順(<code>created_at DESC</code>)」に表示したい。</p>
-                        <pre class="drill-code"><code class="language-sql">SELECT * FROM posts
-                            WHERE category_id = 5
-                            ORDER BY created_at DESC;</code></pre>
-                        <p>このクエリで <strong>Sort処理を発生させない</strong> 最適なインデックスは？</p>
+                        <p>記事一覧クエリの実行計画に <strong>Sort Key: created_at DESC</strong> というノードが出現し、メモリを消費しています。<br>
+                            この <strong>Sort ノードを消滅させる</strong>（オプティマイザにソート不要と判断させる）ためのインデックス戦略は？</p>
                     </div>
                     <details>
                         <summary>解答を表示</summary>
                         <div class="answer">
                             <pre><code class="language-sql">CREATE INDEX idx_posts_cat_date ON posts(category_id, created_at DESC);</code></pre>
-                            <p><strong>解説:</strong> <code>category_id</code> で絞り込んだ後、その中身がすでに <code>created_at</code>
-                                順に並んでいる必要があるため、この順序の複合インデックスが必須です。</p>
+                            <p><strong>解説:</strong> オプティマイザは「インデックスが既にソートされている」ことを知っています。
+                                <code>category_id</code> で絞り込んだ後、<code>created_at</code>
+                                順に並んでいるB-treeがあれば、そのまま読み出すだけでよいため、Sort処理をスキップできます。
+                            </p>
                         </div>
                     </details>
                 </div>
@@ -735,16 +736,17 @@ Seq Scan on users_expert ...
                         <span class="star-rating">★★★☆☆</span>
                     </div>
                     <div>
-                        <p>社員テーブル <code>employees</code> に <code>deleted_at</code> (TIMESTAMP) カラムがあります。<br>
-                            退職済み（deleted_at が入っている）社員は全体の50%を占めますが、検索されるのは常に「在職中 (deleted_at IS NULL)」の社員だけです。<br>
-                            インデックスサイズを節約しつつ、在職社員の検索を高速化するDDLを書いてください。</p>
+                        <p>退職済みフラグを含むテーブルで、ごく一部の「在職中」データだけを検索します。<br>
+                            しかし、通常のインデックスでは無駄な「退職済みデータ」まで管理され、更新コストとディスク容量を圧迫しています。<br>
+                            <strong>オプティマイザに「在職中の行だけ」のパスを提供しつつ、サイズを最小化する</strong> 手法は？
+                        </p>
                     </div>
                     <details>
                         <summary>解答を表示</summary>
                         <div class="answer">
-                            <pre><code class="language-sql">CREATE INDEX idx_active_employees ON employees(id) WHERE deleted_at IS NULL;</code></pre>
-                            <p><strong>解説:</strong> <code>WHERE</code>
-                                句付きのインデックス（部分インデックス）を作成することで、インデックスサイズを半分に削減でき、更新コストも抑えられます。</p>
+                            <pre><code class="language-sql">CREATE INDEX idx_active ON employees(id) WHERE deleted_at IS NULL;</code></pre>
+                            <p><strong>解説:</strong> 部分インデックス (Partial Index) です。オプティマイザはクエリの <code>WHERE</code>
+                                句を見て「このインデックスを使えば無駄なスキャンをしなくて済む」と判断し、利用します。</p>
                         </div>
                     </details>
                 </div>
@@ -755,17 +757,15 @@ Seq Scan on users_expert ...
                         <span class="star-rating">★★★★☆</span>
                     </div>
                     <div>
-                        <p>商品テーブル <code>products</code> から、<code>id</code> と <code>price</code> だけを取得するクエリが頻繁に走ります。</p>
-                        <pre
-                            class="drill-code"><code class="language-sql">SELECT id, price FROM products WHERE category_id = 10;</code></pre>
-                        <p>テーブル本体へのアクセスを完全に回避し、高速化するためのインデックス定義は？</p>
+                        <p>実行計画を見ると <strong>Heap Fetches</strong> が発生しており、テーブル本体へのアクセスがボトルネックになっています。<br>
+                            これを <strong>Heap Fetches: 0 (Index Only Scan)</strong> に変えるためのチューニングを行ってください。</p>
                     </div>
                     <details>
                         <summary>解答を表示</summary>
                         <div class="answer">
-                            <pre><code class="language-sql">CREATE INDEX idx_products_cover ON products(category_id) INCLUDE (id, price);</code></pre>
-                            <p><strong>解説:</strong> 検索条件である <code>category_id</code> をキーにし、取得したい <code>id</code>,
-                                <code>price</code> を <code>INCLUDE</code> (付加領域) に含めることで、Index Only Scan を実現できます。
+                            <pre><code class="language-sql">CREATE INDEX idx_cover ON products(category_id) INCLUDE (id, price);</code></pre>
+                            <p><strong>解説:</strong>
+                                カバリングインデックスです。クエリに必要な全てのカラムをインデックス（KeyまたはInclude）に含めることで、オプティマイザは「テーブルを見に行く必要がない」と判断し、高速なパスを選択します。
                             </p>
                         </div>
                     </details>
@@ -802,75 +802,80 @@ Seq Scan on users_expert ...
 
                 <div class="drill-card type-hard">
                     <div class="drill-q">
-                        <span>Q12. LIKE検索の罠</span>
+                        <span>Q12. LIKE検索と実行計画</span>
                         <span class="star-rating">★★★☆☆</span>
                     </div>
                     <div>
-                        <p>住所検索 <code>WHERE address LIKE '%東京都%'</code> がインデックスを使わず遅い。なぜか？またどう解決するか？</p>
+                        <p><code>WHERE address LIKE '%東京都%'</code> の実行計画が <strong>Seq Scan</strong> になりました。<br>
+                            B-treeインデックスが存在するのに、なぜオプティマイザはそれを使わなかった（使えなかった）のですか？</p>
                     </div>
                     <details>
                         <summary>解答を表示</summary>
                         <div class="answer">
-                            <strong>解答: 中間一致だから。解決策は pg_trgm。</strong><br>
-                            標準のB-treeは「辞書順」なので、先頭の文字が決まらないと探索できません。<br>
-                            解決策:
-                            <code>CREATE EXTENSION pg_trgm; CREATE INDEX ON tbl USING GIN (address gin_trgm_ops);</code>
-                            とすることで、中間一致でもインデックスが効くようになります。
+                            <strong>解答: 中間一致はB-treeの探索ロジックと合致しないため。</strong><br>
+                            B-treeは「辞書順」でソートされています。先頭文字が不明な <code>%東京都%</code>
+                            は、辞書のどこを見ればいいか特定できないため、オプティマイザは「全ページ読むしかない」と判断しました。<br>
+                            解決策: <code>pg_trgm</code> (GIN Index) を導入することで、オプティマイザに新たなパスを提供できます。
                         </div>
                     </details>
                 </div>
 
                 <div class="drill-card type-hard">
                     <div class="drill-q">
-                        <span>Q13. オフセット法 (Pagination) の限界</span>
+                        <span>Q13. Offset のコスト要因</span>
                         <span class="star-rating">★★★★☆</span>
                     </div>
                     <div>
-                        <p><code>LIMIT 50 OFFSET 1000000</code> が非常に遅い理由を説明し、代替案を示してください。</p>
+                        <p><code>LIMIT 50 OFFSET 1000000</code> の実行計画を見ると、コストが非常に高く、実行時間も長いです。<br>
+                            オプティマイザは効率的に「100万行スキップ」できないのでしょうか？その理由を構造的に説明してください。</p>
                     </div>
                     <details>
                         <summary>解答を表示</summary>
                         <div class="answer">
-                            <strong>解答: 先頭100万件を読み捨てているから。</strong><br>
-                            DBは「100万1件目がどこか」をいきなり知ることはできません。先頭から順に数える必要があります。<br>
-                            代替案（シーク法）: <code>WHERE id > [前ページの最後のID] LIMIT 50</code>
-                            とすることで、インデックスを使ってピンポイントに次のページを開始できます。
+                            <strong>解答: 行の可視性などを行ごとにチェックする必要があるため。</strong><br>
+                            RDBの構造上、「100万番目」という位置情報は事前に維持されていません（行削除やMVCCがあるため）。<br>
+                            そのため、オプティマイザは「先頭から100万行を読み込み、可視性を確認して、捨てる」という処理を計画せざるを得ません。これが高コストの理由です。
                         </div>
                     </details>
                 </div>
 
                 <div class="drill-card type-hard">
                     <div class="drill-q">
-                        <span>Q14. システム停止の危機</span>
+                        <span>Q14. Plan Rows と Actual Rows の乖離</span>
                         <span class="star-rating">★★★★☆</span>
                     </div>
                     <div>
-                        <p>運用中の超巨大テーブルに対し <code>CREATE INDEX</code> コマンドを昼間に実行したら、ユーザーから「サイトが繋がらない」と苦情が殺到しました。何が起きた？</p>
+                        <p>実行計画で、<code>rows=1</code> (推定) となっているのに、<code>Actual rows=10000</code> (実測) と大きな乖離がありました。<br>
+                            これが原因で Nested Loop が選ばれてしまい、激遅になっています。原因と解決策は？</p>
                     </div>
                     <details>
                         <summary>解答を表示</summary>
                         <div class="answer">
-                            <strong>解答: テーブルロックによるブロッキング。</strong><br>
-                            通常のインデックス作成は <code>SHARE LOCK</code> を取り、更新処理（INSERT/UPDATE）をブロックします。<br>
-                            回避策: <code>CREATE INDEX CONCURRENTLY</code> を使用すれば、ロックを最小限に抑えてインデックスを作成できます（ただし時間はかかります）。
+                            <strong>解答: 統計情報の欠損（Stale Statistics）。解決策は ANALYZE。</strong><br>
+                            オプティマイザは統計情報（pg_statistic）を元にコスト計算をします。データが大量に更新されたのに統計情報が古いと、オプティマイザは「1行しかないならNested
+                            Loopが最速だ」と判断を誤ります。<br>
+                            <code>ANALYZE table_name;</code> を実行して統計情報を最新化することで、正しい計画（Hash Joinなど）が選ばれるようになります。
                         </div>
                     </details>
                 </div>
 
                 <div class="drill-card type-hard">
                     <div class="drill-q">
-                        <span>Q15. インデックスとUUID</span>
+                        <span>Q15. 結合アルゴリズムの選択 (Join Strategy)</span>
                         <span class="star-rating">★★★☆☆</span>
                     </div>
                     <div>
-                        <p>主キーに <code>UUID v4</code> (完全ランダムなID)
-                            を採用しました。データ量が増えるにつれ、INSERT性能が急激に悪化しました。インデックスの観点から理由を説明してください。</p>
+                        <p>テーブルA (10行) と テーブルB (100万行) を結合する際、オプティマイザは <strong>Nested Loop Join</strong> と <strong>Hash
+                                Join</strong> のどちらを選ぶ可能性が高いですか？<br>
+                            また、その判断基準（コスト構造）を説明してください。</p>
                     </div>
                     <details>
                         <summary>解答を表示</summary>
                         <div class="answer">
-                            <strong>解答: インデックスの断片化とランダムI/O。</strong><br>
-                            ランダムな値はB-treeの「あちこち」に挿入されます。これにより、キャッシュ（バッファ）に乗っていないページへのアクセスが多発し、ディスクI/O負荷が高まります。またページ分割も頻発し、格納効率（充填率）も悪化します。
+                            <strong>解答: Nested Loop Join。</strong><br>
+                            Nested Loopは「Aの1行ごとにBを検索する」方式です。<br>
+                            Aが極端に小さい場合、Bにインデックスがあれば「10回インデックスを引く」だけで済み、非常に高速です。<br>
+                            逆にAもBも大きい場合、オプティマイザは事前にハッシュテーブルを作る Hash Join や、ソートして結合する Merge Join を選択します。
                         </div>
                     </details>
                 </div>
@@ -882,18 +887,22 @@ Seq Scan on users_expert ...
 
                 <div class="drill-card type-hard">
                     <div class="drill-q">
-                        <span>Q16. count(*) と MVCC</span>
+                        <span>Q16. Index Only Scan と Heap Fetches</span>
                         <span class="star-rating">★★★★★</span>
                     </div>
                     <div>
-                        <p><code>SELECT count(*) FROM users</code>。B-treeインデックスがあるのに、なぜIndex Scanだけで瞬時に件数を返せないのですか？</p>
+                        <p><code>EXPLAIN ANALYZE</code> の結果、<strong>Index Only Scan</strong> が選ばれているのに、<strong>Heap
+                                Fetches: 5000</strong> と表示され、期待したほど速くありません。<br>
+                            この数字は何を意味し、なぜ発生しているのですか？</p>
                     </div>
                     <details>
                         <summary>解答を表示</summary>
                         <div class="answer">
-                            <strong>解答: 可視性(Visibility)の確認が必要だから。</strong><br>
-                            PostgreSQLはMVCCを採用しており、インデックスエントリが存在しても、その行が「今のトランザクションから見て生きて（commitされて）いるか」は分かりません。テーブル本体（Heap）を見てトランザクションID(xmin/xmax)を確認するか、Index
-                            Only Scanが可能ならばVisibility Mapを確認するプロセスが必須となるため、メタデータ上の数字を返すだけで済むMyISAM等とは異なります。
+                            <strong>解答: インデックスだけでは可視性を判断できなかった（Visibility Mapの更新遅れ）。</strong><br>
+                            PostgreSQLのMVCCでは、インデックス上のタプルが「有効（コミット済み）」かどうかを確認する必要があります。<br>
+                            通常は <strong>Visibility Map</strong>
+                            を見て判断しますが、更新直後などでマップが古いままだと、結局テーブル本体（Heap）を見に行く必要があります。これが Heap Fetches です。<br>
+                            解決策: <code>VACUUM tables;</code>
                         </div>
                     </details>
                 </div>
@@ -921,56 +930,60 @@ Seq Scan on users_expert ...
 
                 <div class="drill-card type-hard">
                     <div class="drill-q">
-                        <span>Q18. BRINインデックスの使い所</span>
+                        <span>Q18. BRIN と Lossy Bitmap Scan</span>
                         <span class="star-rating">★★★★☆</span>
                     </div>
                     <div>
-                        <p>B-tree ではなく <strong>BRIN (Block Range INdex)</strong> を使うべきなのは、どのようなデータ、どのような用途の時ですか？</p>
+                        <p>BRINインデックスを使った実行計画に <strong>Bitmap Heap Scan (Lossy)</strong> と表示されました。<br>
+                            通常のB-treeのBitmap Scanと異なり、「Lossy（不正確）」とはどういう意味ですか？</p>
                     </div>
                     <details>
                         <summary>解答を表示</summary>
                         <div class="answer">
-                            <strong>解答: 物理的に整列した時系列ビッグデータ。</strong><br>
-                            IoTログや売上履歴など、「日付順にインサートされ、日付で検索する」ような場合、BRINは最小値・最大値だけを保持するため、B-treeに比べてサイズが圧倒的に（数百分の一）小さくなります。検索精度は落ちますが、巨大なテーブルの絞り込みには極めて有効です。
+                            <strong>解答: 厳密なTIDではなく、ブロック単位で「あるかも」と判定しているから。</strong><br>
+                            BRINはページ（ブロック）のレンジ（最小値・最大値）しか持っていません。「このページに含まれる可能性がある」という粒度でビットマップを作るため、実際にページを開いてみないとマッチするか確定しません（Recheckが必要）。これが
+                            Lossy の意味です。
                         </div>
                     </details>
                 </div>
 
                 <div class="drill-card type-hard">
                     <div class="drill-q">
-                        <span>Q19. VACUUM FULL とインデックス</span>
+                        <span>Q19. VACUUM FULL と実行計画の変化</span>
                         <span class="star-rating">★★★★★</span>
                     </div>
                     <div>
-                        <p>肥大化したテーブルに <code>VACUUM FULL</code> を実行しました。この時、インデックスはどうなりますか？デメリットは？</p>
+                        <p><code>VACUUM FULL</code> (または CLUSTER) を実行した後、それまで <strong>Bitmap Scan</strong> だったクエリが
+                            <strong>Index Scan</strong> に変わり、劇的に高速化しました。<br>
+                            オプティマイザの判断を変えさせた「物理的な統計情報の変化」は何ですか？
+                        </p>
                     </div>
                     <details>
                         <summary>解答を表示</summary>
                         <div class="answer">
-                            <strong>解答: 全てのインデックスが再構築される。</strong><br>
-                            VACUUM FULL はテーブルを新しいファイルに書き写すため、全ての行の物理住所 (TID)
-                            が変わります。これに伴い、付随する全てのインデックスもゼロから作り直しになります。最強のメンテナンスですが、処理中は<b>排他ロック</b>がかかり、テーブルへの一切のアクセスができなくなるのが最大のデメリットです。
+                            <strong>解答: 相関度 (Correlation/Clustering Factor) の向上。</strong><br>
+                            テーブルが再構築されたことで、物理的な行の並び順とインデックスの順序が一致（相関度が高く）なりました。<br>
+                            オプティマイザは「ランダムアクセスが減り、シーケンシャルに近い速度でディスクを読める」と判断し、コスト見積もりを大幅に下げたため、Index Scan が選ばれるようになりました。
                         </div>
                     </details>
                 </div>
 
                 <div class="drill-card type-hard">
                     <div class="drill-q">
-                        <span>Q20. 銀の弾丸</span>
+                        <span>Q20. Planning Time の増大</span>
                         <span class="star-rating">★★★★★</span>
                     </div>
                     <div>
-                        <p>「ディスク容量が許す限り、全てのカラムにインデックスを貼っておけば、どんなクエリも速くなるはずだ」という主張を論破してください。</p>
+                        <p>あるクエリの実行時間は 1ms なのに、<strong>Planning Time = 100ms</strong> となっています。<br>
+                            オプティマイザが「考え」すぎてしまっている原因として、インデックス構成の観点から何が考えられますか？</p>
                     </div>
                     <details>
                         <summary>解答を表示</summary>
                         <div class="answer">
-                            <strong>解答: 更新性能の劣化とオプティマイザの混乱。</strong><br>
-                            1. <b>Write Penalty</b>: インデックスの数だけ、INSERT/UPDATE/DELETE
-                            時に更新処理が発生します。7個インデックスがあれば、1行の追加で8回の書き込みが必要です。<br>
-                            2. <b>Buffer Pool</b>: 無駄なインデックスがメモリ（バッファ）を圧迫し、肝心なデータのキャッシュ率を下げます。<br>
-                            3. <b>Planning Time</b>: 選択肢が多すぎると、オプティマイザが実行計画を考える時間が増えます。<br>
-                            「必要なものだけを作る」のが正解です。
+                            <strong>解答: インデックスの過剰作成（選択肢が多すぎる）。</strong><br>
+                            オプティマイザ（GEQO等）は、可能なアクセスパスの組み合わせを探索してコスト最小のプランを探します。
+                            無駄なインデックスが大量にあると、それら全てを「使うべきか否か」の検討対象に含めてしまうため、計算量爆発（Combinatorial
+                            Explosion）を起こし、計画作成時間が実行時間を上回る現象が発生します。
                         </div>
                     </details>
                 </div>
